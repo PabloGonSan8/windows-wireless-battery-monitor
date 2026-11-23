@@ -13,7 +13,9 @@ use windows::Foundation::{IPropertyValue, PropertyType};
 use windows::Storage::Streams::DataReader;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::System::Com::CoIncrementMTAUsage;
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Controls::*;
@@ -27,6 +29,7 @@ struct Battery {
     name: String,
     level: i32,
     glyph: char,
+    classic: bool,
 }
 
 // ---------------------------------------------------------------- Bluetooth
@@ -43,10 +46,15 @@ fn read_all() -> Vec<Battery> {
     let mut r = Vec::new();
     let _ = read_classic(&mut r);
     let _ = read_low_energy(&mut r);
-    // Classic first, so it wins duplicates (stable sort keeps insertion order for equal names).
-    r.sort_by(|a, b| a.name.cmp(&b.name));
-    r.dedup_by(|a, b| a.name == b.name);
+    dedup(&mut r);
     r
+}
+
+/// Dual-mode devices show up twice (Classic + LE): keep the Classic entry (pushed first; stable sort keeps
+/// insertion order for equal names). Identical devices on the same protocol (two controllers) both stay.
+fn dedup(r: &mut Vec<Battery>) {
+    r.sort_by(|a, b| a.name.cmp(&b.name));
+    r.dedup_by(|a, b| a.name == b.name && a.classic != b.classic);
 }
 
 fn props(names: &[&str]) -> IIterable<HSTRING> {
@@ -91,7 +99,7 @@ fn read_classic(out: &mut Vec<Battery>) -> windows::core::Result<()> {
             let name = dev.Name()?.to_string();
             // Battery via Hands-Free profile => almost always audio.
             let glyph = glyph_from_name(&name).unwrap_or(HEADPHONES);
-            out.push(Battery { name, level: level as i32, glyph });
+            out.push(Battery { name, level: level as i32, glyph, classic: true });
         }
     }
     Ok(())
@@ -118,7 +126,7 @@ fn read_low_energy(out: &mut Vec<Battery>) -> windows::core::Result<()> {
             }
         };
         let glyph = glyph_from_name(&name).or_else(appearance).unwrap_or(BLUETOOTH);
-        out.push(Battery { name, level, glyph });
+        out.push(Battery { name, level, glyph, classic: false });
     }
     Ok(())
 }
@@ -196,12 +204,13 @@ struct App {
     height: i32,
     icon_font: HFONT,
     text_font: HFONT,
-    fg: COLORREF,
-    bg: COLORREF,
+    fg: Cell<COLORREF>,
+    bg: Cell<COLORREF>,
     right: Cell<i32>,
     drag_x: Cell<i32>,
     refreshing: Cell<bool>,
     items: RefCell<Vec<Battery>>,
+    warned: RefCell<Vec<String>>, // devices already notified as low
 }
 
 thread_local! { static APP: Cell<Option<&'static App>> = const { Cell::new(None) }; }
@@ -209,13 +218,36 @@ fn app() -> Option<&'static App> { APP.with(|a| a.get()) }
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF { COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16) }
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().collect() }
+/// Copies `s` into a fixed Win32 buffer, always leaving room for the terminating null.
+fn copy_wide(dst: &mut [u16], s: &str) {
+    let n = dst.len() - 1;
+    for (d, s) in dst[..n].iter_mut().zip(s.encode_utf16()) { *d = s; }
+}
+
+// ponytail: two UI languages picked from the Windows display language. Move to a table when a third arrives.
+fn tr(en: &'static str, es: &'static str) -> &'static str {
+    if unsafe { GetUserDefaultUILanguage() } & 0x3FF == 0x0A { es } else { en } // 0x0A = LANG_SPANISH
+}
+
+/// (text color, background/color-key) for the current Windows theme.
+fn theme() -> (COLORREF, COLORREF) {
+    let light = CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|k| k.get_u32("SystemUsesLightTheme"))
+        .is_ok_and(|v| v == 1);
+    // ponytail: color-key transparency, text fringes blend toward this color. Per-pixel alpha (UpdateLayeredWindow) if it looks off.
+    if light { (rgb(0, 0, 0), rgb(238, 238, 238)) } else { (rgb(255, 255, 255), rgb(32, 32, 32)) }
+}
 
 fn main() {
     // Keep the MTA alive for the whole process: worker threads join it implicitly, and windows-rs caches
     // WinRT factories that would dangle (crash on next refresh) if the MTA died with a worker thread.
     unsafe { let _ = CoIncrementMTAUsage(); }
     if std::env::args().any(|a| a == "--list") {
-        // Debug: `BatteryMonitor.exe --list | more` prints what was detected.
+        // Debug: print what was detected. GUI-subsystem app, so borrow the parent console when there is one
+        // (a pipe, as in `--list | more`, already has a handle and is left alone).
+        unsafe { let _ = AttachConsole(ATTACH_PARENT_PROCESS); }
+        println!();
         for b in read_all() {
             println!("{}: {}%", b.name, b.level);
         }
@@ -240,13 +272,7 @@ unsafe fn run() {
         dwICC: ICC_WIN95_CLASSES,
     });
 
-    let light = CURRENT_USER
-        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        .and_then(|k| k.get_u32("SystemUsesLightTheme"))
-        .is_ok_and(|v| v == 1);
-    // ponytail: color-key transparency, text fringes blend toward this color. Per-pixel alpha (UpdateLayeredWindow) if it looks off.
-    let bg = if light { rgb(238, 238, 238) } else { rgb(32, 32, 32) };
-    let fg = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
+    let (fg, bg) = theme();
 
     let mut tb = RECT::default();
     let _ = GetWindowRect(taskbar, &mut tb);
@@ -310,13 +336,14 @@ unsafe fn run() {
     nid.hIcon = LoadImageW(Some(hinst), PCWSTR(1 as _), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)
         .map(|h| HICON(h.0)).unwrap_or_default();
-    for (d, s) in nid.szTip.iter_mut().zip(wide("Batería Bluetooth")) { *d = s; }
+    copy_wide(&mut nid.szTip, tr("Bluetooth battery", "Batería Bluetooth"));
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
 
     let state: &'static App = Box::leak(Box::new(App {
-        host, overlay, tip, taskbar, mutex, height, icon_font, text_font, fg, bg,
+        host, overlay, tip, taskbar, mutex, height, icon_font, text_font,
+        fg: Cell::new(fg), bg: Cell::new(bg),
         right: Cell::new(right), drag_x: Cell::new(0), refreshing: Cell::new(false),
-        items: RefCell::new(Vec::new()),
+        items: RefCell::new(Vec::new()), warned: RefCell::new(Vec::new()),
     }));
     APP.with(|a| a.set(Some(state)));
 
@@ -381,7 +408,7 @@ unsafe fn layout(a: &App, dc: HDC, draw: bool) -> i32 {
     let old = SelectObject(dc, a.text_font.into());
     let mut x = 6;
     for b in a.items.borrow().iter() {
-        let color = if b.level <= LOW_BATTERY { rgb(255, 99, 71) } else { a.fg };
+        let color = if b.level <= LOW_BATTERY { rgb(255, 99, 71) } else { a.fg.get() };
         SetTextColor(dc, color);
         for (f, s, gap) in [(a.icon_font, wide(&b.glyph.to_string()), 3), (a.text_font, wide(&format!("{}%", b.level)), 12)] {
             SelectObject(dc, f.into());
@@ -433,9 +460,11 @@ fn set_run_at_startup(on: bool) {
 unsafe fn show_menu(a: &App) {
     let Ok(menu) = CreatePopupMenu() else { return };
     let startup = run_at_startup();
-    let _ = AppendMenuW(menu, MF_STRING, CMD_REFRESH, w!("Actualizar"));
-    let _ = AppendMenuW(menu, MF_STRING | if startup { MF_CHECKED } else { MF_UNCHECKED }, CMD_STARTUP, w!("Iniciar con Windows"));
-    let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Salir"));
+    let label = |en, es| HSTRING::from(tr(en, es));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_REFRESH, &label("Refresh", "Actualizar"));
+    let _ = AppendMenuW(menu, MF_STRING | if startup { MF_CHECKED } else { MF_UNCHECKED }, CMD_STARTUP,
+        &label("Start with Windows", "Iniciar con Windows"));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, &label("Exit", "Salir"));
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
     // Foreground + WM_NULL: standard dance so the menu closes when clicking elsewhere.
@@ -448,6 +477,26 @@ unsafe fn show_menu(a: &App) {
         CMD_STARTUP => set_run_at_startup(!startup),
         CMD_EXIT => quit(a),
         _ => {}
+    }
+}
+
+/// Tray balloon (a toast on Windows 10/11) once per device each time it drops to LOW_BATTERY.
+unsafe fn warn_low(a: &App) {
+    let items = a.items.borrow();
+    let mut warned = a.warned.borrow_mut();
+    // Re-arm once charged a bit (5 % hysteresis avoids repeats when hovering at the threshold) or disconnected.
+    warned.retain(|n| items.iter().any(|b| &b.name == n && b.level <= LOW_BATTERY + 5));
+    for b in items.iter().filter(|b| b.level <= LOW_BATTERY) {
+        if warned.contains(&b.name) {
+            continue;
+        }
+        warned.push(b.name.clone());
+        let mut nid = notify_data(a.host);
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_WARNING;
+        copy_wide(&mut nid.szInfoTitle, tr("Low battery", "Batería baja"));
+        copy_wide(&mut nid.szInfo, &format!("{}: {}%", b.name, b.level));
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
 
@@ -478,12 +527,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             *a.items.borrow_mut() = *Box::from_raw(lp.0 as *mut Vec<Battery>);
             a.refreshing.set(false);
             relayout(a);
+            warn_low(a);
+        }
+        // Light/dark switch: recolor without a restart.
+        WM_SETTINGCHANGE => {
+            let (fg, bg) = theme();
+            a.fg.set(fg);
+            a.bg.set(bg);
+            let _ = SetLayeredWindowAttributes(a.overlay, bg, 0, LWA_COLORKEY);
+            let _ = InvalidateRect(Some(a.overlay), None, true);
         }
         WM_TRAY if matches!((lp.0 & 0xFFFF) as u32, WM_RBUTTONUP | WM_LBUTTONUP) => show_menu(a),
         WM_PAINT if hwnd == a.overlay => {
             let mut ps = PAINTSTRUCT::default();
             let dc = BeginPaint(hwnd, &mut ps);
-            let brush = CreateSolidBrush(a.bg);
+            let brush = CreateSolidBrush(a.bg.get());
             FillRect(dc, &ps.rcPaint, brush);
             let _ = DeleteObject(brush.into());
             layout(a, dc, true);
@@ -525,5 +583,14 @@ mod tests {
         assert_eq!(glyph_from_name("WH-1000XM4"), Some(HEADPHONES));
         assert_eq!(glyph_from_name("K380 Keyboard"), Some(KEYBOARD));
         assert_eq!(glyph_from_name("Thing"), None);
+    }
+
+    #[test]
+    fn dedup_keeps_identical_devices_on_same_protocol() {
+        let bat = |name: &str, classic| Battery { name: name.into(), level: 50, glyph: BLUETOOTH, classic };
+        let mut r = vec![bat("Buds", true), bat("Pad", false), bat("Pad", false), bat("Buds", false)];
+        dedup(&mut r);
+        let got: Vec<_> = r.iter().map(|b| (b.name.as_str(), b.classic)).collect();
+        assert_eq!(got, [("Buds", true), ("Pad", false), ("Pad", false)]);
     }
 }

@@ -1,0 +1,52 @@
+name: 🐞 Bug report
+description: Something doesn't work as expected (crash, wrong position, overlay missing…).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A device whose battery doesn't show up? Please use the **Device compatibility report** form instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the app
+        2. …
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "Run `winver` and copy the first line."
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: App version
+      placeholder: "e.g. 1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Taskbar and display setup
+      placeholder: "e.g. taskbar at the bottom, 2 monitors, 150 % scaling, dark theme"
+  - type: textarea
+    id: list
+    attributes:
+      label: Output of `WirelessBatteryMonitor.exe --list | more`
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or anything else

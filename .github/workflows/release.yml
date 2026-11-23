@@ -1,0 +1,81 @@
+name: release
+
+# Push a tag like v1.1.0 (matching Cargo.toml) to build and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write      # create the release
+  id-token: write      # build provenance attestation
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check tag matches Cargo.toml
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version v$v"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/WirelessBatteryMonitor.exe dist/
+          Compress-Archive -Path target/release/WirelessBatteryMonitor.exe, README.md, LICENSE `
+            -DestinationPath "dist/WirelessBatteryMonitor-$tag-win-x64.zip"
+          Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content dist/SHA256SUMS.txt -Encoding ascii
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/WirelessBatteryMonitor.exe
+            dist/*.zip
+
+      - name: Release notes
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          # Section of CHANGELOG.md for this version.
+          awk -v v="$v" 'index($0, "## [" v "]") == 1 {f=1; next} index($0, "## [") == 1 {f=0} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "::error::No '## [$v]' section in CHANGELOG.md"; exit 1; fi
+          cat >> notes.md <<'EOF'
+
+          ## Download
+
+          - **`WirelessBatteryMonitor.exe`** — download and double-click. Nothing to install.
+          - **`WirelessBatteryMonitor-*-win-x64.zip`** — same executable plus README and license.
+
+          The executable is not code-signed yet: if SmartScreen shows *"Windows protected your PC"*,
+          click **More info → Run anyway**. Verify the download against `SHA256SUMS.txt`, or with
+          `gh attestation verify WirelessBatteryMonitor.exe -R ${{ github.repository }}`.
+
+          Does your device work? [Report it](https://github.com/${{ github.repository }}/issues/new?template=device_report.yml) — it takes two minutes.
+          EOF
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Wireless Battery Monitor $GITHUB_REF_NAME" --notes-file notes.md
