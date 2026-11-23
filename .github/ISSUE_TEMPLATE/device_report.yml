@@ -1,0 +1,70 @@
+name: 🎧 Device compatibility report
+description: Tell us whether your Bluetooth device works. No programming knowledge needed.
+title: "[Device] <brand and model>"
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Reports of devices that **don't** work are just as useful as those that do.
+        Gracias: puedes rellenar esto en español.
+  - type: input
+    id: device
+    attributes:
+      label: Device brand and model
+      placeholder: "e.g. Logitech MX Master 3S, Sony WH-1000XM5, Xbox Wireless Controller"
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Device type
+      options: [Mouse, Keyboard, Headphones / earbuds, Game controller, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: works
+    attributes:
+      label: Does the battery level show up in Wireless Battery Monitor?
+      options: ["Yes, correct level", "Yes, but the level looks wrong", "No"]
+    validations:
+      required: true
+  - type: dropdown
+    id: settings
+    attributes:
+      label: Does Windows show a battery percentage for it in Settings → Bluetooth & devices?
+      options: ["Yes", "No", "I don't know"]
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How is it connected?
+      options: ["Bluetooth (paired in Windows)", "USB receiver / dongle", "I don't know"]
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "Press Win+R, type `winver`, press Enter, and copy the first line (e.g. Windows 11 24H2, build 26100)."
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: App version
+      placeholder: "e.g. 1.1.0"
+  - type: textarea
+    id: list
+    attributes:
+      label: Output of --list (optional, helps a lot)
+      description: |
+        Open the folder with the .exe, click the address bar, type `powershell`, press Enter, then run:
+        `.\WirelessBatteryMonitor.exe --list | more` and paste the result here.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Wrong icon, wrong name, firmware version, screenshot…
