@@ -1,11 +1,6 @@
 # Rust build output
 target/
 
-# Leftovers from the old .NET build (safe to delete locally)
-bin/
-obj/
-publish/
-
 # Editors / OS
 .vs/
 .vscode/
