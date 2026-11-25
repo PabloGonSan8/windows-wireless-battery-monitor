@@ -261,6 +261,10 @@ unsafe fn run() {
     if GetLastError() == ERROR_ALREADY_EXISTS {
         return;
     }
+    // Exe moved/renamed since "Start with Windows" was ticked -> Run entry points to nothing. Re-point it.
+    if run_at_startup() {
+        set_run_at_startup(true);
+    }
     // ponytail: at logon the taskbar may not exist yet, just wait for it.
     let taskbar = loop {
         if let Ok(h) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) { break h }

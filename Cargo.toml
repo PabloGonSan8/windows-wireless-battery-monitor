@@ -1,6 +1,6 @@
 [package]
 name = "wireless-battery-monitor"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "MIT"
 description = "Battery level of your Bluetooth devices, always visible in the Windows taskbar"
